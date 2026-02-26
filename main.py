@@ -88,7 +88,7 @@ class MemoryDatabase:
         # print(f"Loading data from {filepath}...")
         with open(filepath, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
-            self.columns = reader.fieldnames
+            self.columns = reader.fieldnames or []
             for row in reader:
                 self.data.append(row)
         # print(f"Loaded {self.data.size} records with {len(self.columns)} columns")
@@ -206,31 +206,52 @@ class MemoryDatabase:
         quick_sort_recursive(0, len(arr) - 1)
         return arr
     
-    def execute_query(self, query: str) -> List[dict]:
+    def execute_query(self, query: str):
         """
         Execute custom SQL-like query
         Format: select {columns} from {table} order by {column} ASC/DSC with {sort_algorithm}
         Example: select age, sex, school from t1 order by age ASC with bubble_sort
         """
-        # 1. Remove any trailing periods or spaces from the end of the query
-        query = query.strip().rstrip('.')
-        
         # Parse the query using regex
-        pattern = r'select\s+(.+?)\s+from\s+(\w+)\s+order\s+by\s+(\w+)\s+(ASC|DSC)\s+with\s+(\w+)'
-        match = re.match(pattern, query, re.IGNORECASE)
+        q = query.strip()
+
+        # allow trailing '.' or ';'
+        q = re.sub(r'[.;]\s*$', '', q)
+
+        # allow extra comma before FROM (assignment example sometimes has it)
+        q = re.sub(r',\s*from\b', ' from', q, flags=re.IGNORECASE)
+
+        pattern = r'^\s*select\s+(.+?)\s+from\s+(\w+)\s+order\s+by\s+(\w+)\s+(ASC|DSC|DESC)\s+with\s+(\w+)\s*$'
+        match = re.match(pattern, q, re.IGNORECASE)
         
         if not match:
             raise ValueError("Invalid query format. Use: select {columns} from {table} order by {column} ASC/DSC with {sort_algorithm}")
         
         columns_str, table, order_column, direction, sort_algorithm = match.groups()
         
-        # 2. Parse columns and safely handle any extra commas (like "c1, c2, c3,")
+        # Only one table supported (matches your assignment examples)
+        if table.lower() != "t1":
+            raise ValueError("Only table supported: t1")
+
+        # Case-insensitive column support
+        col_map = {c.lower(): c for c in self.columns}
+
+        def normalize_col(name: str) -> str:
+            key = name.strip().lower()
+            return col_map.get(key, name.strip())
+        
+        # Parse columns
         if columns_str.strip() == '*':
             selected_columns = self.columns
         else:
-            # The 'if col.strip()' part prevents empty strings if there is a trailing comma
-            selected_columns = [col.strip() for col in columns_str.split(',') if col.strip()]
+            selected_columns = [normalize_col(col) for col in columns_str.split(',') if col.strip()]
         
+        order_column = normalize_col(order_column)
+
+        direction = direction.upper()
+        if direction == "DESC":
+            direction = "DSC"
+
         # Validate columns
         for col in selected_columns:
             if col not in self.columns:
@@ -247,6 +268,19 @@ class MemoryDatabase:
             'quick_sort': self.quick_sort
         }
         
+        sort_algorithm = sort_algorithm.lower()
+        aliases = {
+            "bubble": "bubble_sort",
+            "bubblesort": "bubble_sort",
+            "insertion": "insertion_sort",
+            "insertionsort": "insertion_sort",
+            "merge": "merge_sort",
+            "mergesort": "merge_sort",
+            "quick": "quick_sort",
+            "quicksort": "quick_sort",
+        }
+        sort_algorithm = aliases.get(sort_algorithm, sort_algorithm)
+
         if sort_algorithm not in sort_methods:
             raise ValueError(f"Unknown sorting algorithm: {sort_algorithm}. Use: bubble_sort, insertion_sort, merge_sort, quick_sort")
         
@@ -272,37 +306,32 @@ class MemoryDatabase:
         for row in sorted_data:
             filtered_row = {col: row[col] for col in selected_columns}
             result.append(filtered_row)
-            
+        
         # print(f"Sort completed in {self.stats[sort_algorithm]['time']:.6f} seconds")
         # print(f"Comparisons made: {self.stats[sort_algorithm]['comparisons']}")
         
-        return result
-    def export_to_csv_recursive(self, data: List[dict], filepath: str, index=0):
-        """
-        Export data to CSV using recursion
-        Base case: when index reaches the length of data
-        """
-        if index == 0:
-            # Write header on first call
-            with open(filepath, 'w', newline='', encoding='utf-8') as f:
-                if data:
-                    writer = csv.DictWriter(f, fieldnames=data[0].keys())
-                    writer.writeheader()
-            # print(f"\nExporting to {filepath}...")
-        
-        # Base case: all rows written
-        if index >= len(data):
-            # print(f"Successfully exported {len(data)} records to {filepath}")
-            return
-        
-        # Recursive case: write one row and recurse
-        with open(filepath, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=data[index].keys())
-            writer.writerow(data[index])
-        
-        # Recurse to next row
-        self.export_to_csv_recursive(data, filepath, index + 1)
+        return result, sort_algorithm
     
+    def export_to_csv_recursive(self, data: List[dict], filepath: str):
+        """Export data to CSV using recursion (file opened once)."""
+        if not data:
+            with open(filepath, "w", newline="", encoding="utf-8") as f:
+                pass
+            return
+
+        fieldnames = list(data[0].keys())
+
+        def write_rows(i: int, writer):
+            if i >= len(data):  # base case
+                return
+            writer.writerow(data[i])
+            write_rows(i + 1, writer)  # recursive step
+
+        with open(filepath, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            write_rows(0, writer)
+
     def _memory_usage_kb(self):
         pid = os.getpid()
         result = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)])
@@ -382,80 +411,149 @@ def print_performance_stats(db: MemoryDatabase):
             if stats['time'] > 0:
                 print(f"  Comparisons/second: {stats['comparisons']/stats['time']:.2f}")
 
-
+def print_sql_help():
+    print("\nSQL-like Query Format:")
+    print("  select <col1, col2, ... | *> from t1 order by <col> ASC|DSC with <algorithm>.")
+    print("\nExamples:")
+    print("  select age, sex from t1 order by age ASC with merge_sort.")
+    print("  select age, sex, school, from t1 order by age DESC with quick.")
+    print("\nAlgorithms:")
+    print("  bubble_sort | bubble")
+    print("  insertion_sort | insertion")
+    print("  merge_sort | merge")
+    print("  quick_sort | quick")
+    print("Type 'q' to quit, 'help' to show this again.\n")
 def main():
-    print("=== Memory Database running on OnlineGDB ===")
-    
     db = MemoryDatabase()
-    csv_file = "student-data.csv"
+    is_loaded = False
     
-    # 1. Load the data
-    try:
-        db.load_csv(csv_file)
-        print(f"Successfully loaded {csv_file}")
-    except FileNotFoundError:
-        print(f"\nERROR: Could not find '{csv_file}'.")
-        print("Please click the 'Upload file' button in the top left of OnlineGDB to upload your CSV.")
-        return
-
-    # ==========================================================
-    # TASK 1: Run the standard sorting algorithms (Req #4 & #6)
-    # ==========================================================
-    print("\n" + "="*70)
-    print("TASK 1: RUNNING STANDARD SORTING ALGORITHMS")
-    print("="*70)
-    
-    column_to_sort = "age"
-    order = "ASC"
-    algorithms = [
-        "bubble_sort", 
-        "insertion_sort", 
-        "merge_sort", 
-        "quick_sort"
-    ]
-    
-    for algo in algorithms:
-        print(f"\nRunning {algo.upper()} on column '{column_to_sort}' ({order})...")
-        # This automatically runs the sort, tracks stats, and exports sorted_algo.csv
-        db.run_sort(algo, column_to_sort, order)
-
-
-    # ==========================================================
-    # TASK 2: Execute Custom SQL Queries (Req #5)
-    # ==========================================================
-    print("\n\n" + "="*70)
-    print("TASK 2: EXECUTING CUSTOM SQL QUERIES")
-    print("="*70)
-    
-    queries = [
-        "select * from t1 order by age ASC with bubble_sort.",
-        "select school, sex, age, absences from t1 order by absences DSC with quick_sort.",
-        "select age, studytime, failures, from t1 order by failures ASC with merge_sort"
-    ]
-    
-    for i, query in enumerate(queries, 1):
-        print(f"\nExecuting SQL Query {i}:")
-        print(f"  {query}")
+    while True:
+        print("\n" + "="*50)
+        print("         MEMORY DATABASE MAIN MENU")
+        print("="*50)
+        print("1. Load CSV file into Database")
+        print("2. Run Standard Sorting Algorithm")
+        print("3. Execute Custom SQL Query")
+        print("4. Exit")
+        print("="*50)
         
-        try:
-            # Parse and execute the SQL
-            result = db.execute_query(query)
+        choice = input("Enter your choice (1-4): ").strip()
+        
+        # -----------------------------------------
+        # OPTION 1: LOAD DATABASE
+        # -----------------------------------------
+        if choice == '1':
+            filepath = input("Enter CSV filename [default: student-data.csv]: ").strip()
+            if not filepath:
+                filepath = "student-data.csv"
+                
+            try:
+                db.data.clear()  
+                db.load_csv(filepath)
+                is_loaded = True
+                print(f"\n✅ Successfully loaded {db.data.size} records from '{filepath}'.")
+                print(f"Columns available: {', '.join(db.columns)}")
+                
+                # --- PREVIEW ADDED ---
+                print("\nPreview (first 3 rows):")
+                for row in db.get_data_snapshot()[:3]:
+                    print(row)
+                    
+            except FileNotFoundError:
+                print(f"\n❌ ERROR: Could not find file '{filepath}'. Please check the filename.")
+        
+        # -----------------------------------------
+        # OPTION 2: STANDARD SORTING
+        # -----------------------------------------
+        elif choice == '2':
+            if not is_loaded:
+                print("\n❌ ERROR: Please load the database first (Option 1).")
+                continue
             
-            # Extract algorithm name to name the file
-            pattern = r'with\s+(\w+)'
-            match = re.search(pattern, query.strip().rstrip('.'))
-            algo_name = match.group(1) if match else f"query_{i}"
+            print("\n--- Select Sorting Algorithm ---")
+            print("1. Bubble Sort")
+            print("2. Insertion Sort")
+            print("3. Merge Sort")
+            print("4. Quick Sort")
+            algo_choice = input("Choose algorithm (1-4): ").strip()
             
-            # Export the SQL results
-            out_file = f"sorted_sql_{algo_name}.csv"
-            db.export_to_csv_recursive(result, out_file)
-            print(f" Exported {len(result)} records to {out_file} (Time: {db.stats[algo_name]['time']:.6f}s)")
+            algo_map = {'1': 'bubble_sort', '2': 'insertion_sort', '3': 'merge_sort', '4': 'quick_sort'}
+            if algo_choice not in algo_map:
+                print("\n❌ Invalid choice.")
+                continue
             
-        except Exception as e:
-            print(f"Error executing query: {e}")
+            algo = algo_map[algo_choice]
+            col = input("Enter column to sort by [default: age]: ").strip() or "age"
             
-    print("\n All tasks complete! You now have both standard and SQL-sorted CSV files.")
-
+            if col not in db.columns:
+                print(f"\n❌ ERROR: Column '{col}' does not exist.")
+                continue
+            
+            order = input("Enter order (ASC/DSC) [default: ASC]: ").strip().upper() or "ASC"
+            if order not in ["ASC", "DSC", "DESC"]:
+                print("\n❌ Invalid order. Use ASC or DSC.")
+                continue
+            
+            print(f"\nSorting {db.data.size} records using {algo.upper()}...")
+            try:
+                db.run_sort(algo, col, order)
+                out_file = f"sorted_{algo}.csv"
+                print(f"✅ Sorting complete! Check the generated '{out_file}'.")
+                
+                # --- PREVIEW ADDED ---
+                # We read the first 3 lines directly from the newly created file!
+                print("\nPreview (first 3 rows):")
+                import csv
+                with open(out_file, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for i, row in enumerate(reader):
+                        if i >= 3: break
+                        print(row)
+                        
+            except Exception as e:
+                print(f"\n❌ Error during sorting: {e}")
+                
+        # -----------------------------------------
+        # OPTION 3: CUSTOM SQL QUERY
+        # -----------------------------------------
+        elif choice == '3':
+            if not is_loaded:
+                print("\n❌ ERROR: Please load the database first (Option 1).")
+                continue
+            
+            print("\n--- Execute Custom SQL Query ---")
+            print("Format: select {columns} from t1 order by {column} ASC/DSC with {algorithm}.")
+            print("Example: select age, sex from t1 order by absences ASC with merge_sort")
+            query = input("\nDB> ").strip()
+            
+            if not query:
+                continue
+                
+            try:
+                result, algo_name = db.execute_query(query)
+                out_file = f"sorted_sql_{algo_name}.csv"
+                db.export_to_csv_recursive(result, out_file)
+                
+                print(f"\n✅ Exported {len(result)} records to '{out_file}'")
+                print(f"⏱️ Time: {db.stats[algo_name]['time']:.6f} seconds")
+                
+                # --- PREVIEW ALREADY HERE ---
+                print("\nPreview (first 3 rows):")
+                for row in result[:3]:
+                    print(row)
+                    
+            except Exception as e:
+                print(f"\n❌ Error executing query: {e}")
+                
+        # -----------------------------------------
+        # OPTION 4: EXIT
+        # -----------------------------------------
+        elif choice == '4':
+            print("\nExiting Memory Database... Goodbye!")
+            break
+            
+        else:
+            print("\n❌ Invalid choice. Please enter 1, 2, 3, or 4.")
 
 if __name__ == "__main__":
     main()
